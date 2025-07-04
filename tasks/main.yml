@@ -1,0 +1,153 @@
+---
+
+# 1. Mettre à jour le système
+- name: Update Debian-based systems
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Update RedHat-based systems
+  dnf:
+    name: "*"
+    state: latest
+  when: ansible_facts['os_family'] == "RedHat"
+
+# 2. Installer les paquets nécessaires
+- name: Install required packages on Debian
+  apt:
+    name:
+      - apache2
+      - php
+      - libapache2-mod-php
+      - php-mysql
+      - mariadb-server
+      - wget
+      - unzip
+    state: present
+    update_cache: yes
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Install required packages on RedHat
+  dnf:
+    name:
+      - httpd
+      - php
+      - php-mysqlnd
+      - mariadb-server
+      - wget
+      - unzip
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"
+
+# 3. Supprimer la page par défaut d’Apache
+- name: Remove default Apache index.html
+  file:
+    path: /var/www/html/index.html
+    state: absent
+
+# 4. Démarrer Apache (dans conteneur)
+- name: Start Apache on Debian
+  shell: service apache2 start
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Start Apache on RedHat
+  shell: /usr/sbin/httpd -DFOREGROUND &
+  async: 0
+  poll: 0
+  when: ansible_facts['os_family'] == "RedHat"
+
+# 5. Démarrer MariaDB dans conteneur
+- name: Start MariaDB safely in background (Debian)
+  shell: mysqld_safe --datadir=/var/lib/mysql &
+  async: 0
+  poll: 0
+  when: ansible_facts['os_family'] == "Debian"
+
+- name: Start MariaDB safely in background (RedHat)
+  shell: /usr/libexec/mysqld --datadir=/var/lib/mysql &
+  async: 0
+  poll: 0
+  when: ansible_facts['os_family'] == "RedHat"
+
+# 6. Attendre que MariaDB soit prêt (test actif)
+- name: Wait until MariaDB is ready to accept connections
+  shell: |
+    for i in {1..15}; do
+      mysqladmin ping -uroot && exit 0
+      sleep 2
+    done
+    exit 1
+  register: mariadb_ready
+  changed_when: false
+  failed_when: mariadb_ready.rc != 0
+
+# 7. Sécuriser MariaDB
+- name: Set root password and secure MariaDB
+  shell: |
+    mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mariadb_root_password }}';"
+    mysql -uroot -p{{ mariadb_root_password }} -e "DELETE FROM mysql.user WHERE User='';"
+    mysql -uroot -p{{ mariadb_root_password }} -e "DROP DATABASE IF EXISTS test;"
+    mysql -uroot -p{{ mariadb_root_password }} -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
+    mysql -uroot -p{{ mariadb_root_password }} -e "FLUSH PRIVILEGES;"
+
+# 8. Créer la base de données WordPress
+- name: Create WordPress database and user
+  shell: |
+    mysql -uroot -p{{ mariadb_root_password }} -e "CREATE DATABASE IF NOT EXISTS {{ wp_db_name }};"
+    mysql -uroot -p{{ mariadb_root_password }} -e "CREATE USER IF NOT EXISTS '{{ wp_db_user }}'@'localhost' IDENTIFIED BY '{{ wp_db_password }}';"
+    mysql -uroot -p{{ mariadb_root_password }} -e "GRANT ALL PRIVILEGES ON {{ wp_db_name }}.* TO '{{ wp_db_user }}'@'localhost';"
+    mysql -uroot -p{{ mariadb_root_password }} -e "FLUSH PRIVILEGES;"
+
+# 9. Télécharger et installer WordPress
+- name: Download latest WordPress
+  get_url:
+    url: https://wordpress.org/latest.zip
+    dest: /tmp/latest.zip
+
+- name: Unzip WordPress
+  unarchive:
+    src: /tmp/latest.zip
+    dest: /tmp/
+    remote_src: yes
+
+- name: Copy WordPress to web root
+  copy:
+    src: /tmp/wordpress/
+    dest: /var/www/html/
+    remote_src: yes
+  notify: Restart Apache
+
+- name: Set permissions for WordPress files
+  file:
+    path: /var/www/html
+    owner: www-data
+    group: www-data
+    recurse: yes
+    mode: "0755"
+
+# 10. Créer le fichier wp-config.php
+- name: Generate wp-config.php
+  template:
+    src: wp-config.php.j2
+    dest: /var/www/html/wp-config.php
+    owner: www-data
+    group: www-data
+    mode: "0640"
+
+# 11. Déployer la configuration Apache
+- name: Configure Apache for WordPress
+  template:
+    src: wordpress.conf.j2
+    dest: "{{ apache_conf_path }}/wordpress.conf"
+  notify: Reload Apache
+
+- name: Enable WordPress site (Debian)
+  command: a2ensite wordpress.conf
+  when: ansible_facts['os_family'] == "Debian"
+  notify: Reload Apache
+
+- name: Enable mod_rewrite (Debian)
+  command: a2enmod rewrite
+  when: ansible_facts['os_family'] == "Debian"
+  notify: Reload Apache

@@ -1,0 +1,12 @@
+---
+
+# Informations MariaDB
+mariadb_root_password: examplerootPW
+wp_db_name: wordpress
+wp_db_user: example
+wp_db_password: examplePW
+
+# Chemins Apache
+apache_conf_path: "{{ '/etc/apache2/sites-available' if ansible_facts['os_family'] == 'Debian' else '/etc/httpd/conf.d' }}"
+document_root: "/var/www/html/wordpress"
+apache_log_dir: "{{ '/var/log/apache2' if ansible_facts['os_family'] == 'Debian' else '/var/log/httpd' }}"
